@@ -1,36 +1,25 @@
-// Uses Node.js built-in sqlite (Node 22.5+) — no npm package or compilation needed.
-const { DatabaseSync } = require('node:sqlite');
-const path = require('path');
+const { Pool } = require('pg');
 
-function getDbPath() {
-  if (process.env.VERCEL) return '/tmp/app.db';
-  return process.env.DATABASE_URL || path.join(__dirname, 'app.db');
-}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-let _db;
+let _initPromise = null;
 
-function getDb() {
-  if (_db) return _db;
-  _db = new DatabaseSync(getDbPath());
-  _initSchema(_db);
-  return _db;
-}
-
-function _initSchema(db) {
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA foreign_keys = ON;
-
+async function initDb() {
+  if (_initPromise) return _initPromise;
+  _initPromise = pool.query(`
     CREATE TABLE IF NOT EXISTS config (
       id INTEGER PRIMARY KEY DEFAULT 1,
       access_token TEXT,
       page_id TEXT,
       instagram_account_id TEXT,
-      updated_at TEXT DEFAULT (datetime('now'))
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS campaigns (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       post_id TEXT NOT NULL,
       post_preview_url TEXT,
@@ -38,20 +27,21 @@ function _initSchema(db) {
       keywords TEXT NOT NULL,
       comment_reply TEXT NOT NULL,
       dm_message TEXT NOT NULL,
-      active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS processed_comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       comment_id TEXT UNIQUE NOT NULL,
       campaign_id INTEGER,
-      processed_at TEXT DEFAULT (datetime('now'))
+      processed_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE INDEX IF NOT EXISTS idx_comment_id ON processed_comments(comment_id);
   `);
+  return _initPromise;
 }
 
-module.exports = { getDb };
+module.exports = { pool, initDb };

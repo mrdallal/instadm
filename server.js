@@ -1,25 +1,38 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const { initDb } = require('./db');
 
 const app = express();
 
-// Static assets served from CDN on Vercel, from Express locally
+// Guard: ensure DB schema exists before any request is handled
+let _dbReady = false;
+const _dbReadyPromise = initDb().then(() => { _dbReady = true; }).catch(err => {
+  console.error('DB init failed:', err.message);
+});
+
+app.use((req, res, next) => {
+  if (_dbReady) return next();
+  _dbReadyPromise.then(next).catch(next);
+});
+
 app.use('/static', express.static(path.join(__dirname, 'static')));
 
-// Webhook must come before express.json() to get raw body for signature check
+// Webhook must be registered before express.json() to keep raw body for signature check
 app.use(require('./routes/webhook'));
-
-// REST API
 app.use(require('./routes/api'));
 
-// Dashboard SPA — serves the same HTML for / and /dashboard
 app.get(['/', '/dashboard'], (req, res) => {
   res.sendFile(path.join(__dirname, 'templates', 'dashboard.html'));
 });
 
-// Health check for deployment platforms
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error(err.message);
+  res.status(500).json({ detail: err.message });
+});
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {

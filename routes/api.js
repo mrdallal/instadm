@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDb } = require('../db');
+const { pool } = require('../db');
 const { getPostDetails } = require('../instagram');
 
 const router = express.Router();
@@ -11,8 +11,9 @@ function row2campaign(row) {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-router.get('/api/config', (req, res) => {
-  const cfg = getDb().prepare('SELECT * FROM config WHERE id = 1').get() || {};
+router.get('/api/config', async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM config WHERE id = 1');
+  const cfg = rows[0] || {};
   res.json({
     access_token: cfg.access_token || '',
     page_id: cfg.page_id || '',
@@ -21,82 +22,84 @@ router.get('/api/config', (req, res) => {
   });
 });
 
-router.post('/api/config', (req, res) => {
+router.post('/api/config', async (req, res) => {
   const { access_token, page_id, instagram_account_id } = req.body;
-  const db = getDb();
-  db.prepare(`
+  const { rows } = await pool.query(`
     INSERT INTO config (id, access_token, page_id, instagram_account_id, updated_at)
-    VALUES (1, ?, ?, ?, datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET
-      access_token = excluded.access_token,
-      page_id = excluded.page_id,
-      instagram_account_id = excluded.instagram_account_id,
-      updated_at = excluded.updated_at
-  `).run(access_token, page_id, instagram_account_id);
-  res.json(db.prepare('SELECT * FROM config WHERE id = 1').get());
+    VALUES (1, $1, $2, $3, NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      access_token = EXCLUDED.access_token,
+      page_id = EXCLUDED.page_id,
+      instagram_account_id = EXCLUDED.instagram_account_id,
+      updated_at = NOW()
+    RETURNING *
+  `, [access_token, page_id, instagram_account_id]);
+  res.json(rows[0]);
 });
 
 // ── Campaigns ─────────────────────────────────────────────────────────────────
 
-router.get('/api/campaigns', (req, res) => {
-  const rows = getDb().prepare('SELECT * FROM campaigns ORDER BY created_at DESC').all();
+router.get('/api/campaigns', async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM campaigns ORDER BY created_at DESC');
   res.json(rows.map(row2campaign));
 });
 
 router.post('/api/campaigns', async (req, res) => {
   const { name, post_id, keywords, comment_reply, dm_message, active } = req.body;
   const details = await getPostDetails(post_id).catch(() => ({}));
-  const db = getDb();
-  const info = db.prepare(`
-    INSERT INTO campaigns (name, post_id, post_preview_url, post_caption, keywords, comment_reply, dm_message, active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, post_id, details.preview_url || null, details.caption || null, keywords, comment_reply, dm_message, active ? 1 : 0);
-  res.json(row2campaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(info.lastInsertRowid)));
+  const { rows } = await pool.query(`
+    INSERT INTO campaigns
+      (name, post_id, post_preview_url, post_caption, keywords, comment_reply, dm_message, active)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    RETURNING *
+  `, [name, post_id, details.preview_url || null, details.caption || null,
+      keywords, comment_reply, dm_message, active]);
+  res.json(row2campaign(rows[0]));
 });
 
-router.get('/api/campaigns/:id', (req, res) => {
-  const row = getDb().prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!row) return res.status(404).json({ detail: 'Campaign not found' });
-  res.json(row2campaign(row));
+router.get('/api/campaigns/:id', async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM campaigns WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ detail: 'Campaign not found' });
+  res.json(row2campaign(rows[0]));
 });
 
 router.put('/api/campaigns/:id', async (req, res) => {
-  const db = getDb();
-  const existing = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ detail: 'Campaign not found' });
+  const { rows: cur } = await pool.query('SELECT * FROM campaigns WHERE id = $1', [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ detail: 'Campaign not found' });
 
   const { name, post_id, keywords, comment_reply, dm_message, active } = req.body;
-  let { post_preview_url: preview_url, post_caption: caption } = existing;
+  let preview_url = cur[0].post_preview_url;
+  let caption = cur[0].post_caption;
 
-  if (post_id !== existing.post_id) {
+  if (post_id !== cur[0].post_id) {
     const details = await getPostDetails(post_id).catch(() => ({}));
     preview_url = details.preview_url || null;
     caption = details.caption || null;
   }
 
-  db.prepare(`
-    UPDATE campaigns SET name=?, post_id=?, post_preview_url=?, post_caption=?,
-    keywords=?, comment_reply=?, dm_message=?, active=?, updated_at=datetime('now')
-    WHERE id=?
-  `).run(name, post_id, preview_url, caption, keywords, comment_reply, dm_message, active ? 1 : 0, req.params.id);
-
-  res.json(row2campaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id)));
+  const { rows } = await pool.query(`
+    UPDATE campaigns
+    SET name=$1, post_id=$2, post_preview_url=$3, post_caption=$4,
+        keywords=$5, comment_reply=$6, dm_message=$7, active=$8, updated_at=NOW()
+    WHERE id=$9
+    RETURNING *
+  `, [name, post_id, preview_url, caption, keywords, comment_reply, dm_message, active, req.params.id]);
+  res.json(row2campaign(rows[0]));
 });
 
-router.patch('/api/campaigns/:id/toggle', (req, res) => {
-  const db = getDb();
-  const row = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!row) return res.status(404).json({ detail: 'Campaign not found' });
-  db.prepare("UPDATE campaigns SET active=?, updated_at=datetime('now') WHERE id=?").run(row.active ? 0 : 1, req.params.id);
-  res.json(row2campaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id)));
+router.patch('/api/campaigns/:id/toggle', async (req, res) => {
+  const { rows: cur } = await pool.query('SELECT active FROM campaigns WHERE id = $1', [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ detail: 'Campaign not found' });
+  const { rows } = await pool.query(
+    'UPDATE campaigns SET active=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
+    [!cur[0].active, req.params.id]
+  );
+  res.json(row2campaign(rows[0]));
 });
 
-router.delete('/api/campaigns/:id', (req, res) => {
-  const db = getDb();
-  if (!db.prepare('SELECT 1 FROM campaigns WHERE id = ?').get(req.params.id)) {
-    return res.status(404).json({ detail: 'Not found' });
-  }
-  db.prepare('DELETE FROM campaigns WHERE id = ?').run(req.params.id);
+router.delete('/api/campaigns/:id', async (req, res) => {
+  const { rowCount } = await pool.query('DELETE FROM campaigns WHERE id = $1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ detail: 'Not found' });
   res.json({ status: 'deleted' });
 });
 
@@ -110,12 +113,16 @@ router.get('/api/post-preview/:postId', async (req, res) => {
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
-router.get('/api/stats', (req, res) => {
-  const db = getDb();
+router.get('/api/stats', async (req, res) => {
+  const [total, active, processed] = await Promise.all([
+    pool.query('SELECT COUNT(*) AS n FROM campaigns'),
+    pool.query('SELECT COUNT(*) AS n FROM campaigns WHERE active = true'),
+    pool.query('SELECT COUNT(*) AS n FROM processed_comments'),
+  ]);
   res.json({
-    total_campaigns: db.prepare('SELECT COUNT(*) AS n FROM campaigns').get().n,
-    active_campaigns: db.prepare('SELECT COUNT(*) AS n FROM campaigns WHERE active = 1').get().n,
-    processed_comments: db.prepare('SELECT COUNT(*) AS n FROM processed_comments').get().n,
+    total_campaigns: parseInt(total.rows[0].n),
+    active_campaigns: parseInt(active.rows[0].n),
+    processed_comments: parseInt(processed.rows[0].n),
   });
 });
 

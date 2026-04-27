@@ -1,26 +1,27 @@
-const { getDb } = require('./db');
+const { pool } = require('./db');
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v19.0';
 
-function getToken() {
+async function getToken() {
   try {
-    const cfg = getDb().prepare('SELECT access_token FROM config WHERE id = 1').get();
-    if (cfg?.access_token) return cfg.access_token;
+    const { rows } = await pool.query('SELECT access_token FROM config WHERE id = 1');
+    if (rows[0]?.access_token) return rows[0].access_token;
   } catch {}
   return process.env.INSTAGRAM_ACCESS_TOKEN || '';
 }
 
-function getIgAccountId() {
+async function getIgAccountId() {
   try {
-    const cfg = getDb().prepare('SELECT instagram_account_id FROM config WHERE id = 1').get();
-    if (cfg?.instagram_account_id) return cfg.instagram_account_id;
+    const { rows } = await pool.query('SELECT instagram_account_id FROM config WHERE id = 1');
+    if (rows[0]?.instagram_account_id) return rows[0].instagram_account_id;
   } catch {}
   return process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || '';
 }
 
 async function apiRequest(method, urlPath, { params = {}, body } = {}) {
+  const token = await getToken();
   const url = new URL(`${GRAPH_API_BASE}/${urlPath.replace(/^\//, '')}`);
-  url.searchParams.set('access_token', getToken());
+  url.searchParams.set('access_token', token);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -50,7 +51,8 @@ async function replyToComment(commentId, message) {
 }
 
 async function sendDm(instagramUserId, message) {
-  return apiRequest('POST', `${getIgAccountId()}/messages`, {
+  const igAccountId = await getIgAccountId();
+  return apiRequest('POST', `${igAccountId}/messages`, {
     body: { recipient: { id: instagramUserId }, message: { text: message } },
   });
 }
